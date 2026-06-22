@@ -24,9 +24,11 @@ app = Flask(__name__)
 # Security keys from environment variables (Railway)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FLASK_ENV") == "production"
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=2)
+# FIX: frontend/backend on different Railway subdomains = cross-origin.
+# SameSite=Lax blocks cookies cross-origin — must use None + Secure.
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 # ─── Database (PostgreSQL via Railway) ────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///inmova_dev.db")
@@ -40,8 +42,12 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 # ─── CORS (allow React frontend) ──────────────────────────────────────────────
-CORS(app, supports_credentials=True,
-     origins=os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(","))
+allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+CORS(app,
+     supports_credentials=True,
+     origins=[o.strip() for o in allowed_origins],
+     allow_headers=["Content-Type"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # ─── Rate Limiting (in-memory, replace with Redis in production) ──────────────
 _rate_buckets = defaultdict(list)
