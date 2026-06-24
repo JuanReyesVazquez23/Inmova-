@@ -25,10 +25,25 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ─── App Setup ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "None"
-app.config["SESSION_COOKIE_SECURE"]   = True
+# IMPORTANT: SECRET_KEY must be a FIXED value in Railway env variables.
+# If it changes on redeploy, all sessions (admin logins) are invalidated.
+# Generate once with: python -c "import secrets; print(secrets.token_hex(32))"
+_secret = os.environ.get("SECRET_KEY")
+if not _secret:
+    import sys
+    print(
+        "WARNING: SECRET_KEY env var not set. "
+        "Sessions will break on every restart. "
+        "Set SECRET_KEY in Railway environment variables.",
+        file=sys.stderr
+    )
+    _secret = secrets.token_hex(32)
+
+app.secret_key = _secret
+app.config["SESSION_COOKIE_HTTPONLY"]  = True
+app.config["SESSION_COOKIE_SAMESITE"]  = "None"
+app.config["SESSION_COOKIE_SECURE"]    = True
+app.config["SESSION_COOKIE_NAME"]      = "inmova_session"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=8)
 
 # Image upload limit: 5 MB per image
@@ -50,8 +65,21 @@ allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").spl
 CORS(app,
      supports_credentials=True,
      origins=[o.strip() for o in allowed_origins],
-     allow_headers=["Content-Type"],
+     allow_headers=["Content-Type", "X-Requested-With"],
+     expose_headers=["Set-Cookie"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+
+# Explicitly handle CORS preflight for all routes
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    allowed = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")]
+    if origin in allowed:
+        response.headers["Access-Control-Allow-Origin"]      = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"]     = "Content-Type, X-Requested-With"
+        response.headers["Access-Control-Allow-Methods"]     = "GET, POST, PUT, DELETE, OPTIONS"
+    return response
 
 # ─── Rate Limiting ────────────────────────────────────────────────────────────
 _rate_buckets = defaultdict(list)
