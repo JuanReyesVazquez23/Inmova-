@@ -100,9 +100,14 @@ def rate_limit(max_calls: int, window_seconds: int):
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def sanitize(value: str, max_length: int = 500) -> str:
+    """Sanitize a text input. For image data-URLs, skip truncation (they are large)."""
     if not isinstance(value, str):
         return ""
-    return html.escape(value.strip())[:max_length]
+    cleaned = html.escape(value.strip())
+    # Never truncate base64 image data-URLs — they are legitimately large
+    if cleaned.startswith("data:image/"):
+        return cleaned
+    return cleaned[:max_length]
 
 def is_valid_email(email: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email))
@@ -602,6 +607,64 @@ def admin_mark_lead_read(lead_id):
 
 
 # ─── DB Init + Seed ────────────────────────────────────────────────────────────
+def run_migrations():
+    """
+    Alter existing columns from VARCHAR(500) to TEXT.
+    db.create_all() never alters existing columns, so we must do this manually.
+    Safe to run multiple times (checks column type before altering).
+    """
+    try:
+        with db.engine.connect() as conn:
+            # Check and fix agents.image_url
+            result = conn.execute(db.text(
+                """
+                SELECT data_type, character_maximum_length
+                FROM information_schema.columns
+                WHERE table_name = 'agents' AND column_name = 'image_url'
+                """
+            )).fetchone()
+            if result and result[0] == 'character varying':
+                conn.execute(db.text(
+                    "ALTER TABLE agents ALTER COLUMN image_url TYPE TEXT"
+                ))
+                conn.commit()
+                print("✅ Migration: agents.image_url → TEXT")
+
+            # Check and fix properties.image_url
+            result = conn.execute(db.text(
+                """
+                SELECT data_type, character_maximum_length
+                FROM information_schema.columns
+                WHERE table_name = 'properties' AND column_name = 'image_url'
+                """
+            )).fetchone()
+            if result and result[0] == 'character varying':
+                conn.execute(db.text(
+                    "ALTER TABLE properties ALTER COLUMN image_url TYPE TEXT"
+                ))
+                conn.commit()
+                print("✅ Migration: properties.image_url → TEXT")
+
+            # Check and fix site_images.image_url (may not exist yet)
+            result = conn.execute(db.text(
+                """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_name = 'site_images' AND column_name = 'image_url'
+                """
+            )).fetchone()
+            if result and result[0] == 'character varying':
+                conn.execute(db.text(
+                    "ALTER TABLE site_images ALTER COLUMN image_url TYPE TEXT"
+                ))
+                conn.commit()
+                print("✅ Migration: site_images.image_url → TEXT")
+
+    except Exception as e:
+        # Non-fatal: log and continue (may be SQLite in dev)
+        print(f"Migration notice: {e}")
+
+
 def seed_database():
     admin_username = os.environ.get("ADMIN_USERNAME", "admin")
     admin_password = os.environ.get("ADMIN_PASSWORD", "Inmova2025!")
@@ -691,6 +754,7 @@ def seed_database():
 
 with app.app_context():
     db.create_all()
+    run_migrations()   # ALTER columns from VARCHAR(500) → TEXT if needed
     seed_database()
 
 if __name__ == "__main__":
