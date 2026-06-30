@@ -58,6 +58,9 @@ if DATABASE_URL.startswith("postgres://"):
 app.config["SQLALCHEMY_DATABASE_URI"]        = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# Limit incoming request size to 8 MB (images are max 5 MB, so 8 MB gives headroom)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 MB
+
 db = SQLAlchemy(app)
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
@@ -71,7 +74,8 @@ CORS(app,
 
 # Explicitly handle CORS preflight for all routes
 @app.after_request
-def add_cors_headers(response):
+def add_security_headers(response):
+    # ── CORS ──────────────────────────────────────────────────────────────────
     origin = request.headers.get("Origin", "")
     allowed = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")]
     if origin in allowed:
@@ -79,6 +83,33 @@ def add_cors_headers(response):
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Headers"]     = "Content-Type, X-Requested-With"
         response.headers["Access-Control-Allow-Methods"]     = "GET, POST, PUT, DELETE, OPTIONS"
+
+    # ── Security Headers ──────────────────────────────────────────────────────
+    # Prevent clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+    # Prevent MIME-type sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    # Force HTTPS (1 year)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Referrer policy
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    # Permissions policy — disable unneeded browser features
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # Content Security Policy — restricts script/style sources
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' " + " ".join(
+            o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+        ) + "; "
+        "frame-ancestors 'none'"
+    )
+    # Remove server fingerprint
+    response.headers.pop("Server", None)
+    response.headers.pop("X-Powered-By", None)
     return response
 
 # ─── Rate Limiting ────────────────────────────────────────────────────────────
@@ -121,7 +152,12 @@ def generate_csrf_token():
     return token
 
 def validate_csrf(token: str) -> bool:
-    return token == session.get("csrf_token")
+    """Validate CSRF token using constant-time comparison to prevent timing attacks."""
+    stored = session.get("csrf_token", "")
+    if not stored or not token:
+        return False
+    # secrets.compare_digest prevents timing-based token guessing
+    return secrets.compare_digest(stored, token)
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 class Property(db.Model):
@@ -327,6 +363,11 @@ def get_csrf_token():
 def get_site_images():
     images = SiteImage.query.all()
     return jsonify({img.key: img.to_dict() for img in images})
+
+
+@app.errorhandler(413)
+def request_too_large(e):
+    return jsonify({"error": "El archivo enviado es demasiado grande. Máximo 8 MB."}), 413
 
 
 @app.route("/api/contact", methods=["POST"])
@@ -666,8 +707,18 @@ def run_migrations():
 
 
 def seed_database():
-    admin_username = os.environ.get("ADMIN_USERNAME", "admin")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "Inmova2025!")
+    admin_username = os.environ.get("ADMIN_USERNAME")
+    admin_password = os.environ.get("ADMIN_PASSWORD")
+
+    # Fail loudly if admin credentials are not set — never use defaults in production
+    if not admin_username or not admin_password:
+        import sys
+        print(
+            "CRITICAL: ADMIN_USERNAME and ADMIN_PASSWORD must be set as environment variables. "
+            "No default admin will be created.",
+            file=sys.stderr
+        )
+        return  # Skip seeding admin — safer than using defaults
 
     if not AdminUser.query.filter_by(username=admin_username).first():
         db.session.add(AdminUser(
